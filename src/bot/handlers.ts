@@ -123,7 +123,15 @@ async function generateDrafts(
       : '';
 
   if (accepted.length) {
-    await ctx.reply(accepted.join('\n\n— — —\n\n') + miriamNote);
+    // Telegram caps a single message at 4096 chars. Three full LinkedIn drafts
+    // joined together blow past that and Telegram silently 400s the whole reply.
+    // Send each draft as its own message instead. If any single draft is still
+    // too long, chunk it.
+    await ctx.reply(`✏️ ${accepted.length} draft${accepted.length === 1 ? '' : 's'} ready (saved to Drive + backlog):`);
+    for (let i = 0; i < accepted.length; i++) {
+      await replyChunked(ctx, accepted[i]);
+    }
+    if (miriamNote) await ctx.reply(miriamNote.trim());
   }
   if (blocked.length) {
     await ctx.reply(
@@ -133,6 +141,35 @@ async function generateDrafts(
   }
   if (!accepted.length && !blocked.length) {
     await ctx.reply('LLM returned no drafts.');
+  }
+}
+
+/**
+ * Telegram allows up to 4096 chars per message. Split safely on paragraph
+ * boundaries when possible, hard-split otherwise.
+ */
+async function replyChunked(
+  ctx: { reply: (msg: string) => Promise<unknown> },
+  text: string,
+  maxChars = 3900,
+): Promise<void> {
+  if (text.length <= maxChars) {
+    await ctx.reply(text);
+    return;
+  }
+  let remaining = text;
+  while (remaining.length > 0) {
+    if (remaining.length <= maxChars) {
+      await ctx.reply(remaining);
+      return;
+    }
+    // Prefer paragraph break, then line break, then hard cut.
+    const slice = remaining.slice(0, maxChars);
+    let cut = slice.lastIndexOf('\n\n');
+    if (cut < maxChars / 2) cut = slice.lastIndexOf('\n');
+    if (cut < maxChars / 2) cut = maxChars;
+    await ctx.reply(remaining.slice(0, cut));
+    remaining = remaining.slice(cut).replace(/^\n+/, '');
   }
 }
 
