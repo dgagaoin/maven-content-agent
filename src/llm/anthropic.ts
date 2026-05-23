@@ -20,12 +20,16 @@ export class AnthropicAdapter implements LLMAdapter {
 
   async draft(req: DraftRequest): Promise<DraftOutput[]> {
     const count = req.count ?? defaultCount(req.channel);
+    // Drafts are long. 3 LinkedIn posts at ~1,300 chars each + hooks + variant
+    // notes + hashtags + JSON structure easily exceeds 2k tokens. Headroom matters
+    // because mid-string truncation breaks JSON parsing.
     const res = await this.client.messages.create({
       model: this.model,
-      max_tokens: 2048,
+      max_tokens: 8192,
       system: buildDrafterSystem({ ...req, count }),
       messages: [{ role: 'user', content: buildDrafterUser(req) }],
     });
+    assertNotTruncated(res, 'draft');
     const text = extractText(res);
     const parsed = DraftsResponse.parse(extractJson(text));
     return parsed.drafts;
@@ -34,10 +38,11 @@ export class AnthropicAdapter implements LLMAdapter {
   async generateIdeas(req: IdeaRequest): Promise<IdeaOutput[]> {
     const res = await this.client.messages.create({
       model: this.model,
-      max_tokens: 1500,
+      max_tokens: 4096,
       system: buildIdeasSystem(req),
       messages: [{ role: 'user', content: IDEAS_USER }],
     });
+    assertNotTruncated(res, 'ideas');
     const text = extractText(res);
     const parsed = IdeasResponse.parse(extractJson(text));
     return parsed.ideas;
@@ -50,6 +55,14 @@ function extractText(res: Anthropic.Message): string {
   return block.text;
 }
 
+function assertNotTruncated(res: Anthropic.Message, op: string): void {
+  if (res.stop_reason === 'max_tokens') {
+    throw new Error(
+      `${op}: LLM hit max_tokens — output was truncated. Try fewer drafts, or raise max_tokens.`,
+    );
+  }
+}
+
 function extractJson(text: string): unknown {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
   const body = fenced ? fenced[1] : text;
@@ -58,5 +71,18 @@ function extractJson(text: string): unknown {
   if (start === -1 || end === -1 || end <= start) {
     throw new Error(`LLM did not return JSON: ${text.slice(0, 200)}`);
   }
-  return JSON.parse(body.slice(start, end + 1));
+  const slice = body.slice(start, end + 1);
+  try {
+    return JSON.parse(slice);
+  } catch (firstErr) {
+    // One forgiving retry: strip trailing commas (common LLM quirk).
+    const repaired = slice.replace(/,(\s*[}\]])/g, '$1');
+    try {
+      return JSON.parse(repaired);
+    } catch {
+      throw new Error(
+        `LLM returned malformed JSON (${(firstErr as Error).message}). First 300 chars: ${slice.slice(0, 300)}`,
+      );
+    }
+  }
 }
