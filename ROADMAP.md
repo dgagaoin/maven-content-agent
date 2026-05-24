@@ -2,6 +2,20 @@
 
 Build in small, useful phases. Ship MVP-1 before touching MVP-2.
 
+## Status as of May 23, 2026
+
+- ✅ **Phase 0 — Documentation:** complete
+- ✅ **MVP-1 — Drafting + lifecycle:** **SHIPPED** (Railway production, May 23 2026)
+  - Telegram bot live as `@MavenAPISBot`
+  - Drive + JSONL fan-out working; full draft contents saved per `MVN-<id>.md`
+  - Anthropic generating real LinkedIn drafts, X threads, blog, email, video scripts
+  - Safety filter armed (legal-claim, hype, fabricated-features, engagement-bait)
+  - Per-draft message chunking (avoids Telegram's 4096-char limit)
+  - `max_tokens` 8192 for drafts (no more JSON truncation)
+  - `/health` endpoint + Railway health-check auto-recovery
+  - Operating in APIS HQ Telegram group (chat ID `-1003908268570`)
+- ⏳ **MVP-2 — Repurposing engine:** next (paste meeting notes → idea proposals)
+
 ## Phase 0 — Documentation (current)
 
 - [x] README.md
