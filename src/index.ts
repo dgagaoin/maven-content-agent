@@ -33,31 +33,49 @@ async function main(): Promise<void> {
   const bot = createBot(config);
   registerHandlers(bot, { storage, llm });
 
-  const healthPort = Number(process.env.PORT ?? 3001);
+  const portRaw = process.env.PORT;
+  const portParsed = portRaw === undefined ? 3001 : Number(portRaw);
+  if (!Number.isFinite(portParsed) || portParsed <= 0 || portParsed > 65535) {
+    throw new Error(`Invalid PORT: "${portRaw}" — must be a number 1-65535.`);
+  }
+  const basePort = portParsed;
   const getHealthState = (): HealthState => ({
     drive: drive ? 'ready' : 'disabled',
     llm: llm.name === 'anthropic' ? 'anthropic' : 'mock',
     telegram: config.telegram.mode,
   });
-  startHealthServer({ port: healthPort, agent: 'maven', state: getHealthState });
 
   if (config.telegram.mode === 'webhook') {
     if (!config.telegram.webhookBaseUrl) {
       throw new Error('WEBHOOK_BASE_URL required when TELEGRAM_MODE=webhook');
     }
+    // Previously: webhook bound hardcoded :3000 and health bound :(PORT||3001).
+    // On Railway PORT=3000 they collided. Now the platform PORT drives the
+    // webhook; health takes basePort+1.
     const path = `/telegram/${config.telegram.botToken.split(':')[0]}`;
-    log.info('telegram webhook listening', { path });
+    log.info('telegram webhook listening', { port: basePort, path });
+    startHealthServer({ port: basePort + 1, agent: 'maven', state: getHealthState });
     await bot.launch({
-      webhook: { domain: config.telegram.webhookBaseUrl, hookPath: path, port: 3000 },
+      webhook: { domain: config.telegram.webhookBaseUrl, hookPath: path, port: basePort },
     });
   } else {
     log.info('telegram polling started — talk to the bot in Telegram now');
+    startHealthServer({ port: basePort, agent: 'maven', state: getHealthState });
     await bot.launch();
   }
 
-  const shutdown = (sig: string) => () => {
+  const shutdown = (sig: string) => async () => {
     log.info('shutdown', { sig });
-    bot.stop(sig);
+    try {
+      // bot.stop returns a Promise in modern telegraf; cap the wait so SIGTERM
+      // can't hang the container indefinitely.
+      await Promise.race([
+        Promise.resolve(bot.stop(sig)),
+        new Promise((resolve) => setTimeout(resolve, 5000)),
+      ]);
+    } catch (e) {
+      log.error('shutdown error', { error: (e as Error).message });
+    }
     process.exit(0);
   };
   process.once('SIGINT', shutdown('SIGINT'));

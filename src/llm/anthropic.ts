@@ -67,9 +67,30 @@ function extractJson(text: string): unknown {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
   const body = fenced ? fenced[1] : text;
   const start = body.indexOf('{');
-  const end = body.lastIndexOf('}');
-  if (start === -1 || end === -1 || end <= start) {
+  if (start === -1) {
     throw new Error(`LLM did not return JSON: ${text.slice(0, 200)}`);
+  }
+  // Walk to find the balanced closing brace of the FIRST top-level object.
+  // lastIndexOf('}') previously spanned across multiple JSON blobs when the
+  // model emitted prose + a second example object.
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  let end = -1;
+  for (let i = start; i < body.length; i++) {
+    const ch = body[i];
+    if (escape) { escape = false; continue; }
+    if (ch === '\\') { escape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) { end = i; break; }
+    }
+  }
+  if (end === -1) {
+    throw new Error(`LLM returned unbalanced JSON: ${text.slice(0, 200)}`);
   }
   const slice = body.slice(start, end + 1);
   try {

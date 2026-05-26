@@ -9,6 +9,11 @@ export class JsonlContentStorage implements ContentStorage {
   private itemsPath: string;
   private auditPath: string;
   private ready: Promise<void>;
+  // Lazily-built latest-state index. Once loaded, mutations to disk and to the
+  // map happen together so we don't re-parse content.jsonl on every read.
+  // Assumes single-writer (one Maven process per data dir).
+  private index: Map<string, ContentItem> | null = null;
+  private indexLoad: Promise<void> | null = null;
 
   constructor(dataDir: string) {
     const dir = path.resolve(dataDir, 'maven');
@@ -22,8 +27,39 @@ export class JsonlContentStorage implements ContentStorage {
     await fs.appendFile(file, JSON.stringify(obj) + '\n', 'utf8');
   }
 
+  private async ensureIndex(): Promise<Map<string, ContentItem>> {
+    if (this.index) return this.index;
+    if (!this.indexLoad) {
+      this.indexLoad = (async () => {
+        await this.ready;
+        const map = new Map<string, ContentItem>();
+        let raw = '';
+        try {
+          raw = await fs.readFile(this.itemsPath, 'utf8');
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+        }
+        for (const line of raw.split('\n')) {
+          if (!line.trim()) continue;
+          try {
+            const item = ContentItem.parse(JSON.parse(line));
+            // Later rows overwrite earlier ones — latest-state semantics.
+            map.set(item.id, item);
+          } catch (e) {
+            log.warn('skipped malformed content.jsonl line', { error: (e as Error).message });
+          }
+        }
+        this.index = map;
+      })();
+    }
+    await this.indexLoad;
+    return this.index!;
+  }
+
   async appendItem(item: ContentItem): Promise<void> {
+    const idx = await this.ensureIndex();
     await this.append(this.itemsPath, item);
+    idx.set(item.id, item);
     await this.append(this.auditPath, {
       ts: new Date().toISOString(),
       actor: 'maven',
@@ -40,18 +76,13 @@ export class JsonlContentStorage implements ContentStorage {
   }
 
   async getItem(id: string): Promise<ContentItem | null> {
-    const snapshots = await this.readAll();
-    for (let i = snapshots.length - 1; i >= 0; i--) {
-      if (snapshots[i].id === id) return snapshots[i];
-    }
-    return null;
+    const idx = await this.ensureIndex();
+    return idx.get(id) ?? null;
   }
 
   async listItems(filter: ContentFilter): Promise<ContentItem[]> {
-    const snapshots = await this.readAll();
-    const latest = new Map<string, ContentItem>();
-    for (const s of snapshots) latest.set(s.id, s);
-    let arr = [...latest.values()];
+    const idx = await this.ensureIndex();
+    let arr = [...idx.values()];
     if (filter.status) arr = arr.filter((i) => i.status === filter.status);
     if (filter.pillar) arr = arr.filter((i) => i.pillar === filter.pillar);
     if (filter.channel) arr = arr.filter((i) => i.channel === filter.channel);
@@ -66,7 +97,8 @@ export class JsonlContentStorage implements ContentStorage {
     actor: 'danny' | 'miriam' | 'maven',
     extras?: Partial<ContentItem>,
   ): Promise<void> {
-    const current = await this.getItem(id);
+    const idx = await this.ensureIndex();
+    const current = idx.get(id);
     if (!current) throw new Error(`Item not found: ${id}`);
     const next: ContentItem = {
       ...current,
@@ -76,6 +108,7 @@ export class JsonlContentStorage implements ContentStorage {
       approvedBy: status === 'approved' ? (actor === 'maven' ? null : actor) : current.approvedBy,
     };
     await this.append(this.itemsPath, next);
+    idx.set(id, next);
     await this.append(this.auditPath, {
       ts: new Date().toISOString(),
       actor,
@@ -84,26 +117,5 @@ export class JsonlContentStorage implements ContentStorage {
       before: { status: current.status },
       after: { status },
     });
-  }
-
-  private async readAll(): Promise<ContentItem[]> {
-    await this.ready;
-    let raw = '';
-    try {
-      raw = await fs.readFile(this.itemsPath, 'utf8');
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return [];
-      throw e;
-    }
-    const out: ContentItem[] = [];
-    for (const line of raw.split('\n')) {
-      if (!line.trim()) continue;
-      try {
-        out.push(ContentItem.parse(JSON.parse(line)));
-      } catch (e) {
-        log.warn('skipped malformed content.jsonl line', { error: (e as Error).message });
-      }
-    }
-    return out;
   }
 }

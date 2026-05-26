@@ -2,6 +2,8 @@ import type { Telegraf } from 'telegraf';
 import type { ContentStorage } from '../storage/types.js';
 import type { LLMAdapter } from '../llm/types.js';
 import {
+  Pillar as PillarEnum,
+  Audience as AudienceEnum,
   type Channel,
   type Pillar,
   type Voice,
@@ -49,6 +51,7 @@ interface ParsedArgs {
   voice: Voice;
   pillar: Pillar;
   audience: Audience;
+  errors: string[]; // unknown enum values, surfaced to the user instead of swallowed
 }
 
 function parseDraftArgs(raw: string): ParsedArgs {
@@ -56,22 +59,30 @@ function parseDraftArgs(raw: string): ParsedArgs {
   let voice: Voice = 'danny';
   let pillar: Pillar = 'honey_ledger';
   let audience: Audience = 'attorneys';
+  const errors: string[] = [];
   const topicTokens: string[] = [];
   for (const t of tokens) {
     if (t.startsWith('v=')) {
       const v = t.slice(2).toLowerCase();
       if (v === 'miriam') voice = 'miriam';
       else if (v === 'apis' || v === 'apis_brand') voice = 'apis_brand';
-      else voice = 'danny';
+      else if (v === 'danny' || v === '') voice = 'danny';
+      else errors.push(`unknown voice "${v}" (use danny|miriam|apis)`);
     } else if (t.startsWith('p=')) {
-      pillar = (t.slice(2) as Pillar) || pillar;
+      const raw = t.slice(2);
+      const parsed = PillarEnum.safeParse(raw);
+      if (parsed.success) pillar = parsed.data;
+      else if (raw !== '') errors.push(`unknown pillar "${raw}" (use one of: ${PillarEnum.options.join(', ')})`);
     } else if (t.startsWith('a=')) {
-      audience = (t.slice(2) as Audience) || audience;
+      const raw = t.slice(2);
+      const parsed = AudienceEnum.safeParse(raw);
+      if (parsed.success) audience = parsed.data;
+      else if (raw !== '') errors.push(`unknown audience "${raw}" (use one of: ${AudienceEnum.options.join(', ')})`);
     } else {
       topicTokens.push(t);
     }
   }
-  return { topic: topicTokens.join(' ') || 'Honey Ledger demo', voice, pillar, audience };
+  return { topic: topicTokens.join(' ') || 'Honey Ledger demo', voice, pillar, audience, errors };
 }
 
 async function generateDrafts(
@@ -80,7 +91,11 @@ async function generateDrafts(
   rawArgs: string,
   deps: HandlersDeps,
 ): Promise<void> {
-  const { topic, voice, pillar, audience } = parseDraftArgs(rawArgs);
+  const { topic, voice, pillar, audience, errors } = parseDraftArgs(rawArgs);
+  if (errors.length) {
+    await ctx.reply(`Argument error:\n  • ${errors.join('\n  • ')}`);
+    return;
+  }
   await ctx.reply(`Drafting ${channel} (${voice} · ${pillar}) on "${topic}"…`);
   let drafts;
   try {
@@ -173,58 +188,90 @@ async function replyChunked(
   }
 }
 
+// Wrap every command so an unexpected throw becomes a user-facing reply
+// instead of disappearing into the Telegraf error logger.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function safeCommand<C extends { reply: (m: string) => Promise<any> }>(
+  name: string,
+  handler: (ctx: C) => Promise<unknown>,
+) {
+  return async (ctx: C) => {
+    try {
+      await handler(ctx);
+    } catch (e) {
+      const msg = (e as Error).message || String(e);
+      log.error('command failed', { command: name, error: msg });
+      try {
+        await ctx.reply(`Command /${name} failed: ${msg.slice(0, 300)}`);
+      } catch {
+        /* swallow if Telegram is unreachable */
+      }
+    }
+  };
+}
+
 export function registerHandlers(bot: Telegraf, deps: HandlersDeps): void {
   const { storage, llm } = deps;
 
   bot.command('start', (ctx) => ctx.reply(HELP_TEXT));
   bot.command('help', (ctx) => ctx.reply(HELP_TEXT));
 
-  bot.command('draft_linkedin', (ctx) =>
+  bot.command('draft_linkedin', safeCommand('draft_linkedin', (ctx) =>
     generateDrafts(ctx, 'linkedin', ctx.message.text.replace(/^\/\S+\s*/, ''), deps),
-  );
-  bot.command('draft_thread', (ctx) =>
+  ));
+  bot.command('draft_thread', safeCommand('draft_thread', (ctx) =>
     generateDrafts(ctx, 'thread', ctx.message.text.replace(/^\/\S+\s*/, ''), deps),
-  );
-  bot.command('draft_email', (ctx) =>
+  ));
+  bot.command('draft_email', safeCommand('draft_email', (ctx) =>
     generateDrafts(ctx, 'email', ctx.message.text.replace(/^\/\S+\s*/, ''), deps),
-  );
-  bot.command('draft_blog', (ctx) =>
+  ));
+  bot.command('draft_blog', safeCommand('draft_blog', (ctx) =>
     generateDrafts(ctx, 'blog', ctx.message.text.replace(/^\/\S+\s*/, ''), deps),
-  );
-  bot.command('video_script', (ctx) =>
+  ));
+  bot.command('video_script', safeCommand('video_script', (ctx) =>
     generateDrafts(ctx, 'video_script', ctx.message.text.replace(/^\/\S+\s*/, ''), deps),
-  );
+  ));
 
-  bot.command('post_ideas', async (ctx) => {
+  bot.command('post_ideas', safeCommand('post_ideas', async (ctx) => {
     const arg = ctx.message.text.split(/\s+/)[1];
-    const ideas = await llm.generateIdeas(
-      arg ? { pillar: arg as Pillar, count: 5 } : { count: 5 },
-    );
+    let pillar: Pillar | undefined;
+    if (arg) {
+      const parsed = PillarEnum.safeParse(arg);
+      if (!parsed.success) {
+        await ctx.reply(`Unknown pillar "${arg}". Use one of: ${PillarEnum.options.join(', ')}`);
+        return;
+      }
+      pillar = parsed.data;
+    }
+    const ideas = await llm.generateIdeas(pillar ? { pillar, count: 5 } : { count: 5 });
+    if (!ideas.length) return ctx.reply('No ideas returned.');
     await ctx.reply(ideas.map((idea, i) => formatIdea(i + 1, idea)).join('\n\n'));
-  });
+  }));
 
-  bot.command('content_backlog', async (ctx) => {
-    const items = await storage.listItems({ limit: 15 });
-    const open = items.filter((i) => ['idea', 'draft', 'review'].includes(i.status));
+  bot.command('content_backlog', safeCommand('content_backlog', async (ctx) => {
+    // Filter first, then limit — otherwise listItems({ limit: 15 }) can return
+    // 15 published items and hide actual backlog items behind them.
+    const all = await storage.listItems({});
+    const open = all.filter((i) => ['idea', 'draft', 'review'].includes(i.status)).slice(0, 15);
     if (!open.length) return ctx.reply('Backlog is empty.');
     await ctx.reply(open.map(formatDraftCompact).join('\n'));
-  });
+  }));
 
-  bot.command('approved', async (ctx) => {
+  bot.command('approved', safeCommand('approved', async (ctx) => {
     const items = await storage.listItems({ status: 'approved' });
     if (!items.length) return ctx.reply('Nothing approved-waiting.');
     await ctx.reply(items.map(formatDraftCompact).join('\n'));
-  });
+  }));
 
-  bot.command('item', async (ctx) => {
+  bot.command('item', safeCommand('item', async (ctx) => {
     const id = ctx.message.text.split(/\s+/)[1]?.toUpperCase();
     if (!id) return ctx.reply('Usage: /item <id>');
     const item = await storage.getItem(id);
     if (!item) return ctx.reply(`Not found: ${id}`);
     await ctx.reply(formatDraft(item));
-  });
+  }));
 
-  bot.command('approve', async (ctx) => {
+  bot.command('approve', safeCommand('approve', async (ctx) => {
     const id = ctx.message.text.split(/\s+/)[1]?.toUpperCase();
     if (!id) return ctx.reply('Usage: /approve <id>');
     const item = await storage.getItem(id);
@@ -238,18 +285,20 @@ export function registerHandlers(bot: Telegraf, deps: HandlersDeps): void {
     }
     await storage.updateStatus(id, 'approved', actor);
     await ctx.reply(`✅ Approved ${id} (by ${actor}).`);
-  });
+  }));
 
-  bot.command('reject', async (ctx) => {
+  bot.command('reject', safeCommand('reject', async (ctx) => {
     const parts = ctx.message.text.split(/\s+/);
     const id = parts[1]?.toUpperCase();
     const reason = parts.slice(2).join(' ');
     if (!id) return ctx.reply('Usage: /reject <id> <reason>');
+    const item = await storage.getItem(id);
+    if (!item) return ctx.reply(`Not found: ${id}`);
     await storage.updateStatus(id, 'rejected', pickActor(), { performanceNote: reason || null });
     await ctx.reply(`🗑️ Rejected ${id}.`);
-  });
+  }));
 
-  bot.command('regen', async (ctx) => {
+  bot.command('regen', safeCommand('regen', async (ctx) => {
     const id = ctx.message.text.split(/\s+/)[1]?.toUpperCase();
     if (!id) return ctx.reply('Usage: /regen <id>');
     const prior = await storage.getItem(id);
@@ -273,19 +322,21 @@ export function registerHandlers(bot: Telegraf, deps: HandlersDeps): void {
     });
     await storage.appendItem(item);
     await ctx.reply(formatDraft(item));
-  });
+  }));
 
-  bot.command('publish', async (ctx) => {
+  bot.command('publish', safeCommand('publish', async (ctx) => {
     const parts = ctx.message.text.split(/\s+/);
     const id = parts[1]?.toUpperCase();
     const url = parts[2];
     if (!id || !url) return ctx.reply('Usage: /publish <id> <url>');
+    const item = await storage.getItem(id);
+    if (!item) return ctx.reply(`Not found: ${id}`);
     await storage.updateStatus(id, 'published', pickActor(), {
       publishedAt: new Date().toISOString(),
       publishedUrl: url,
     });
     await ctx.reply(`📤 Published ${id} → ${url}`);
-  });
+  }));
 
   bot.command('configtodo', (ctx) => {
     ctx.reply(

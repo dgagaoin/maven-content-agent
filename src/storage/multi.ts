@@ -12,8 +12,25 @@ export class MultiContentStorage implements ContentStorage {
   ) {}
 
   async appendItem(item: ContentItem): Promise<void> {
-    await this.primary.appendItem(item);
-    if (this.drive) void this.uploadAndLink(item);
+    // Upload to Drive first so the persisted item already has driveLink set.
+    // Previously we appended, then asynchronously updateStatus(...same status...,
+    // { driveLink }) — that doubled the jsonl rows and produced a bogus
+    // `status.changed` audit event for every new draft.
+    let withLink: ContentItem = item;
+    if (this.drive) {
+      try {
+        const file = await this.drive.uploadMarkdown(`${item.id}.md`, itemMarkdown(item));
+        if (file.webUrl) {
+          withLink = { ...item, driveLink: file.webUrl };
+          log.info('drive uploaded', { id: item.id, url: file.webUrl });
+        } else {
+          log.warn('drive upload returned no webViewLink', { id: item.id });
+        }
+      } catch (e) {
+        log.error('drive upload failed', { id: item.id, error: (e as Error).message });
+      }
+    }
+    await this.primary.appendItem(withLink);
   }
 
   async getItem(id: string): Promise<ContentItem | null> {
@@ -31,17 +48,6 @@ export class MultiContentStorage implements ContentStorage {
     extras?: Partial<ContentItem>,
   ): Promise<void> {
     await this.primary.updateStatus(id, status, actor, extras);
-  }
-
-  private async uploadAndLink(item: ContentItem): Promise<void> {
-    if (!this.drive) return;
-    try {
-      const file = await this.drive.uploadMarkdown(`${item.id}.md`, itemMarkdown(item));
-      log.info('drive uploaded', { id: item.id, url: file.webUrl });
-      await this.primary.updateStatus(item.id, item.status, 'maven', { driveLink: file.webUrl });
-    } catch (e) {
-      log.error('drive upload failed', { id: item.id, error: (e as Error).message });
-    }
   }
 }
 
