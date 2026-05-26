@@ -277,7 +277,7 @@ export function registerHandlers(bot: Telegraf, deps: HandlersDeps): void {
     const item = await storage.getItem(id);
     if (!item) return ctx.reply(`Not found: ${id}`);
     const vp = VOICE_PROFILES[item.voice];
-    const actor = pickActor();
+    const actor = pickActor(ctx);
     if (vp.requiresOwnerApproval && actor !== 'miriam') {
       return ctx.reply(
         `Cannot approve: ${item.voice}-voiced drafts must be approved by Miriam. Current actor: ${actor}.`,
@@ -294,7 +294,7 @@ export function registerHandlers(bot: Telegraf, deps: HandlersDeps): void {
     if (!id) return ctx.reply('Usage: /reject <id> <reason>');
     const item = await storage.getItem(id);
     if (!item) return ctx.reply(`Not found: ${id}`);
-    await storage.updateStatus(id, 'rejected', pickActor(), { performanceNote: reason || null });
+    await storage.updateStatus(id, 'rejected', pickActor(ctx), { performanceNote: reason || null });
     await ctx.reply(`🗑️ Rejected ${id}.`);
   }));
 
@@ -331,7 +331,7 @@ export function registerHandlers(bot: Telegraf, deps: HandlersDeps): void {
     if (!id || !url) return ctx.reply('Usage: /publish <id> <url>');
     const item = await storage.getItem(id);
     if (!item) return ctx.reply(`Not found: ${id}`);
-    await storage.updateStatus(id, 'published', pickActor(), {
+    await storage.updateStatus(id, 'published', pickActor(ctx), {
       publishedAt: new Date().toISOString(),
       publishedUrl: url,
     });
@@ -351,8 +351,17 @@ export function registerHandlers(bot: Telegraf, deps: HandlersDeps): void {
   });
 }
 
-function pickActor(): 'danny' | 'miriam' | 'maven' {
-  // TODO: map Telegram user IDs → person. For MVP-1, mark approvals as 'danny' so
-  // Miriam-voice approval gate is enforced (only she can clear those).
-  return 'danny';
+// Telegram user_id → person mapping. Defaults match the APIS HQ Telegram IDs
+// (Danny 8658744063, Miriam 5107021202). Override via env if the IDs change
+// or if the bot is reused in another tenant.
+const DANNY_TG_ID = Number(process.env.APIS_DANNY_TELEGRAM_ID ?? 8658744063);
+const MIRIAM_TG_ID = Number(process.env.APIS_MIRIAM_TELEGRAM_ID ?? 5107021202);
+
+function pickActor(ctx: { from?: { id?: number } }): 'danny' | 'miriam' | 'maven' {
+  const uid = ctx.from?.id;
+  if (uid === MIRIAM_TG_ID) return 'miriam';
+  if (uid === DANNY_TG_ID) return 'danny';
+  // Unknown senders (shouldn't normally pass the allow-list, but be safe) are
+  // attributed to the agent itself rather than impersonating either founder.
+  return 'maven';
 }

@@ -2,6 +2,11 @@
 
 All notable changes to this project. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased] — 2026-05-26
+
+### Added
+- **`pickActor()` maps Telegram user_id → person** (`src/bot/handlers.ts`). Danny (8658744063) and Miriam (5107021202) by default; override via `APIS_DANNY_TELEGRAM_ID` / `APIS_MIRIAM_TELEGRAM_ID`. Unblocks the Miriam-voice approval gate — `/approve` on a miriam-voiced draft now actually requires Miriam to be the sender. Unknown senders are attributed to `'maven'` rather than misattributing to a founder.
+
 ## [Unreleased] — 2026-05-25 — Debug pass
 
 ### Fixed
