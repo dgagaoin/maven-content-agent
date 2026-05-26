@@ -2,6 +2,20 @@
 
 Build in small, useful phases. Ship MVP-1 before touching MVP-2.
 
+## Recently completed (May 25, 2026 — debug pass)
+
+See `CHANGELOG.md` for the full list. Highlights:
+
+- ✅ Every Telegram command wrapped in error-handler (Sheets/Drive/LLM errors now reach the user).
+- ✅ `parseDraftArgs` validates `v=/p=/a=` against zod enums; `/post_ideas` validates pillar.
+- ✅ `/content_backlog` filters by status BEFORE limit (15 published items could previously hide all backlog).
+- ✅ `/reject` and `/publish` pre-check item exists.
+- ✅ Drive upload runs before initial append — eliminated double-jsonl-row + bogus `status.changed` audit events.
+- ✅ Railway PORT collision fixed (webhook = PORT, health = PORT+1) + PORT validated 1-65535.
+- ✅ `bot.stop` awaited on SIGTERM with 5s cap.
+- ✅ JSON extractor walks balanced braces (handles prose + example JSON from chatty models).
+- ✅ JSONL store has in-memory `Map<id, ContentItem>` index — no more full-file reparse per read.
+
 ## Status as of May 23, 2026
 
 - ✅ **Phase 0 — Documentation:** complete
